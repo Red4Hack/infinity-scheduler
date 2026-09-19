@@ -10,7 +10,8 @@ cd "$(dirname "$0")" || exit 1
 uname -r | grep -q infinity || \
 	echo "warning: kernel does not look like an infinity build ($(uname -r))"
 
-SCENARIOS="alt-tab wakeup-latency socket-latency rt fork ema-pelt-trace"
+SCENARIOS="alt-tab wakeup-latency socket-latency rt fork ema-pelt-trace
+gpu-idle-compensation gpu-cpu-coupling"
 TIMEOUT=300
 RESULT_FILE=$(mktemp)
 trap 'rm -f "$RESULT_FILE"' EXIT

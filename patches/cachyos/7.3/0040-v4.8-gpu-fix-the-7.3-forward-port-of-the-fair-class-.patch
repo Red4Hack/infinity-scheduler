@@ -1,0 +1,114 @@
+From dd06e5737601b04f564e261ea1e7dbf1e5d8651b Mon Sep 17 00:00:00 2001
+From: Galih Tama <galpt@v.recipes>
+Date: Fri, 18 Sep 2026 20:25:58 -0300
+Subject: [PATCH 40/40] v4.8-gpu: fix the 7.3 forward port of the fair-class
+ hooks
+
+Two bugs specific to the 7.2 -> 7.3 forward port, both in
+kernel/sched/fair.c and both fatal at boot.
+
+1. infinity_update_weight() handed its caller's cfs_rq straight to
+   reweight_entity().  That was correct on 7.2, where update_curr()
+   still held the entity's own cfs_rq, but 7.3 re-points cfs_rq at the
+   root runqueue ("cfs_rq = &rq->cfs;") before calling update_deadline().
+   reweight_entity() does update_load_sub()/update_load_add() on
+   cfs_rq->load and dequeue/enqueue_load_avg() on it, so feeding it the
+   root cfs_rq corrupted the root load weight for every group-queued
+   task:
+
+     WARNING: kernel/sched/fair.c:4874 at reweight_entity+0x1a2
+     cfs_rq != cfs_rq_of(se)
+
+   The corrupted root weight then starved userspace -- sshd never got
+   far enough to print a login banner.  Resolve the cfs_rq from the
+   entity instead, the way every other reweight_entity() call site
+   does; the cfs_rq argument is now unused and is dropped.
+
+2. The EMA accounting block in update_curr() ended up *below* 7.3's
+   "if (!entity_is_task(curr)) return;" bail-out, which 7.2 did not
+   have at that point.  The group-entity else branch -- the group_ema
+   climb that feeds the cgroup shield -- was therefore dead code.  Move
+   the block above the bail-out so both branches run again.
+
+Tested on an AMD Ryzen 5 5600H (amdgpu) and an Intel i5-8365U (i915):
+both boot clean, "cfs_rq != cfs_rq_of" and WARNING counts in dmesg are
+zero after a full regression run, and the v4.8 suite passes 9/9.
+
+Signed-off-by: Galih Tama <galpt@v.recipes>
+---
+ kernel/sched/fair.c | 34 +++++++++++++++++++++++-----------
+ 1 file changed, 23 insertions(+), 11 deletions(-)
+
+diff --git a/kernel/sched/fair.c b/kernel/sched/fair.c
+index 1a68b7d..ce92860 100644
+--- a/kernel/sched/fair.c
++++ b/kernel/sched/fair.c
+@@ -65,9 +65,16 @@
+ static void reweight_entity(struct cfs_rq *cfs_rq, struct sched_entity *se,
+ 			    unsigned long weight);
+ 
+-/* Infinity: update EEVDF weight from EMA */
+-static void infinity_update_weight(struct cfs_rq *cfs_rq,
+-				   struct sched_entity *se,
++/* Infinity: update EEVDF weight from EMA
++ *
++ * Note: reweight_entity() must be given the cfs_rq the entity is actually
++ * queued on -- it does update_load_sub()/update_load_add() on cfs_rq->load
++ * and dequeue/enqueue_load_avg() on it.  Callers such as update_deadline()
++ * may hold a different cfs_rq (since 7.3 update_curr() re-points cfs_rq at
++ * the root &rq->cfs before calling us), so resolve it from the entity, the
++ * way every other reweight_entity() call site does.
++ */
++static void infinity_update_weight(struct sched_entity *se,
+ 				   struct task_struct *p)
+ {
+ 	u64 ema;
+@@ -79,7 +86,7 @@ static void infinity_update_weight(struct cfs_rq *cfs_rq,
+ 	new_weight = infinity_calc_weight(p, ema);
+ 
+ 	if (new_weight != se->load.weight)
+-		reweight_entity(cfs_rq, se, new_weight);
++		reweight_entity(cfs_rq_of(se), se, new_weight);
+ }
+ 
+ /*
+@@ -1358,7 +1365,7 @@ static bool update_deadline(struct cfs_rq *cfs_rq, struct sched_entity *se)
+ #endif
+ 
+ 			/* Update EEVDF weight from EMA */
+-			infinity_update_weight(cfs_rq, se, p__);
++			infinity_update_weight(se, p__);
+ 		}
+ 	}
+ 
+@@ -2114,12 +2121,12 @@ static void update_curr(struct cfs_rq *cfs_rq)
+ 
+ 	account_cfs_rq_runtime(cfs_rq, delta_exec);
+ 
+-	if (!entity_is_task(curr))
+-		return;
+-
+-	cfs_rq = &rq->cfs;
+-
+-	/* Infinity: EMA budget consumption with adaptive alpha */
++	/* Infinity: EMA budget consumption with adaptive alpha.
++	 *
++	 * This has to run before the !entity_is_task(curr) bail-out below,
++	 * otherwise the group-entity branch (group_ema climb feeding the
++	 * cgroup shield) is dead code.
++	 */
+ 	if (entity_is_task(curr)) {
+ 		struct task_struct *p__ = task_of(curr);
+ 
+@@ -2160,6 +2167,11 @@ static void update_curr(struct cfs_rq *cfs_rq)
+ 		}
+ 	}
+ 
++	if (!entity_is_task(curr))
++		return;
++
++	cfs_rq = &rq->cfs;
++
+ 	curr->vruntime += calc_delta_fair(delta_exec, curr);
+ 	resched = update_deadline(cfs_rq, curr);
+ 

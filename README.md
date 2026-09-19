@@ -16,7 +16,8 @@ A fair-share CPU + GPU scheduler based on the limit concept in mathematics — e
 │   ├── arch/7.1/             49 patches — Vanilla kernel.org 7.1
 │   ├── arch/7.2/             39 patches — Vanilla kernel.org 7.2 (7.2-rc7 base)
 │   ├── fedora/7.0/           50 patches — Fedora kernel-ark archived-7.0
-│   └── cachyos/7.1/          49 patches — CachyOS kernel fork (cachyos-7.1.5-1)
+│   ├── cachyos/7.1/          49 patches — CachyOS kernel fork (cachyos-7.1.5-1)
+│   └── cachyos/7.3/          40 patches — CachyOS kernel fork (cachyos-7.3-rc3-4)
 ├── tools/                     Install script, build helpers, patch fixers
 ├── CONTRIBUTING.md
 └── LICENSE
@@ -30,9 +31,8 @@ A fair-share CPU + GPU scheduler based on the limit concept in mathematics — e
 >   verified on real hardware. If you encounter issues or have a working
 >   configuration for another bootloader, a pull request is welcome.
 > - The install script targets **vanilla Arch Linux**. For **CachyOS**,
->   apply the series under `patches/cachyos/7.1/` manually (built for the
->   CachyOS 7.1.5 kernel fork).
-
+>   apply the series under `patches/cachyos/7.1/` or `patches/cachyos/7.3/`
+>   manually (built for the CachyOS 7.1.5 and 7.3-rc3 kernel forks).
 ```bash
 # 1. Clone the repo (v4.8-gpu: IPC-wakeup boost, continuous cgroup shield with cross-CPU detection, RT valve hysteresis, PELT diagnostics — all always-on, no new knobs)
 git clone -b v4.8-gpu --depth 1 https://github.com/galpt/infinity-scheduler.git
@@ -69,7 +69,11 @@ cat /proc/sys/kernel/infinity_stats   # → CPU + GPU accounting table
 ## Using nouveau
 
 > [!NOTE]
-> The GPU rows only track DRM-scheduler-based GPUs (e.g., AMD, Intel Xe/Arc, and the open-source nouveau/NVK stack). NVIDIA's drivers never submit jobs through the DRM GPU scheduler, so on NVIDIA-only machines the GPU section reads zero ("No GPU jobs recorded yet") even while the CPU features work normally. This is by design. Switching to nouveau/NVK would restore the counters, but you might lose ray tracing, CUDA, and NVENC.
+> The GPU rows only track GPUs whose driver submits through the DRM GPU scheduler (`gpu-sched`): `amdgpu`, Intel `xe` (Xe/Arc), and the open-source `nouveau`/NVK stack. Two common cases read zero by design, even while the CPU features work normally:
+> - **NVIDIA's proprietary driver** never submits jobs through the DRM GPU scheduler. Switching to nouveau/NVK would restore the counters, but you might lose ray tracing, CUDA, and NVENC.
+> - **Intel `i915`** (integrated graphics up to Gen12 — Skylake through Rocket Lake, e.g. UHD 620) keeps its own execlist scheduler and never registers with `gpu-sched` either. There is no switch here: the newer `xe` driver only supports Gen12.5+ hardware. Check with `lsmod | grep gpu_sched`.
+>
+> Even on a supported driver, the `Idle compensation` and `CPU->GPU coupling` rows additionally need `gpu-sched` in fair mode (`sched_policy=2`) — see [Regression testing](#regression-testing).
 
 A `gpu-switcher.sh` script is included in the `tools/` directory so you can easily switch from NVIDIA to nouveau and vice versa. It has been tested on CachyOS and requires btrfs if you want the automatic pre-switch snapshot. The nouveau driver is needed to get the benefits of the GPU scheduling included in Infinity. This might be beneficial if you want fairness between apps that are competing for GPU time.
 
@@ -90,7 +94,7 @@ A `gpu-switcher.sh` script is included in the `tools/` directory so you can easi
 
 ## Regression testing
 
-`tools/regression/run-v48-regression.sh` runs the six v4.8 regression
+`tools/regression/run-v48-regression.sh` runs the eight v4.8 regression
 scenarios with a per-scenario timeout and exits 1 on any failure (run as
 root for the perf/cyclictest parts):
 
@@ -106,9 +110,26 @@ sudo bash tools/regression/run-v48-regression.sh
 | `rt` | cyclictest + rogue SCHED_FIFO | max latency < 50 ms (valve requeue) |
 | `fork` | stress-ng --fork | forks > 2000/s |
 | `ema-pelt-trace` | `/proc/<pid>/infinity` + perf | EMA vs PELT divergence ≤ 50pp on a sustained burn |
+| `gpu-idle-compensation` | ffmpeg VAAPI (8 parallel clients) | `Idle compensation` ≥ 10 EMA idle decays |
+| `gpu-cpu-coupling` | ffmpeg VAAPI + SCHED_IDLE control | `CPU->GPU coupling` ≥ 10, control ≤ 25% of it |
 
 Missing tools produce a WARN and a skip, never a false FAIL. See
 `tools/regression/README.md` for the full method and baselining procedure.
+
+> [!IMPORTANT]
+> The two GPU scenarios need the DRM scheduler in **fair** mode. All the
+> Infinity GPU coupling lives in `drm_sched_entity_update_vruntime()`, which
+> is only reached under `DRM_SCHED_POLICY_FAIR`; the upstream module default
+> is FIFO, where `Idle compensation` and `CPU->GPU coupling` are structurally
+> unreachable and read 0. Select it, then rebuild the initramfs so the
+> parameter is in place before the DRM driver loads:
+> ```bash
+> echo 'options gpu-sched sched_policy=2' | sudo tee /etc/modprobe.d/infinity-gpu-sched.conf
+> sudo mkinitcpio -P
+> ```
+> The scenarios emit `WARN policy-<n>` (not a FAIL) when the policy is wrong,
+> and `WARN no-drm-sched` on drivers that bypass the DRM scheduler entirely,
+> such as `i915`.
 
 ## CPU scheduling
 
@@ -223,7 +244,7 @@ atomic64_add→pending_gpu_ns"]
     FINI -. "drained in rq_update_vtime_locked" .-> DRAIN
 ```
 
-### 7.2 layout (upstream fair scheduler + Infinity)
+### 7.2 / 7.3 layout (upstream fair scheduler + Infinity)
 
 ```mermaid
 flowchart TB
@@ -231,7 +252,7 @@ flowchart TB
     classDef algo fill:#0000,stroke:#14b8a6,stroke-width:2
     classDef dec fill:#0000,stroke:#d97706,stroke-width:2
 
-    subgraph GPU72["GPU scheduling 7.2 (DRM fair scheduler + Infinity)"]
+    subgraph GPU72["GPU scheduling 7.2 / 7.3 (DRM fair scheduler + Infinity)"]
         ENTITY["drm_sched_entity
 ─────────────────
 infinity_pid (CPU coupling anchor)"]

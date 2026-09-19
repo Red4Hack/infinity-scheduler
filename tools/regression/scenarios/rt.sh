@@ -15,9 +15,17 @@ command -v cyclictest >/dev/null 2>&1 || { echo "RESULT rt WARN missing cyclicte
 command -v chrt >/dev/null 2>&1 || { echo "RESULT rt WARN missing chrt 0"; exit 0; }
 [ "$(id -u)" -eq 0 ] || { echo "RESULT rt WARN needs-root 0"; exit 0; }
 
+# Parse the FINAL cyclictest summary line.  cyclictest prints a live
+# progress line every update, and the first one carries C:0 / Max:0 -- an
+# awk that exits on the first match therefore always reported 0 and the
+# scenario always passed.  -q suppresses the progress output and the awk
+# below keeps the LAST match instead of exiting on the first.
+get_max() {
+	awk '/^T: /{for (i = 1; i <= NF; i++) if ($i == "Max:") m = $(i + 1)} END {print m}'
+}
+
 # no-rogue baseline
-base=$(cyclictest -t 1 -p "$PRIO" -i "$INTERVAL_US" -l "$LOOPS" 2>&1 |
-	awk '/^T: /{for (i=1;i<=NF;i++) if ($i=="Max:") print $(i+1); exit}')
+base=$(cyclictest -q -t 1 -p "$PRIO" -i "$INTERVAL_US" -l "$LOOPS" 2>&1 | get_max)
 [ -z "$base" ] && base=0
 
 # rogue at the same FIFO priority, busy-looping forever
@@ -25,8 +33,7 @@ chrt -f "$PRIO" sh -c 'while :; do :; done' &
 rogue=$!
 sleep 1
 
-max=$(cyclictest -t 1 -p "$PRIO" -i "$INTERVAL_US" -l "$LOOPS" 2>&1 |
-	awk '/^T: /{for (i=1;i<=NF;i++) if ($i=="Max:") print $(i+1); exit}')
+max=$(cyclictest -q -t 1 -p "$PRIO" -i "$INTERVAL_US" -l "$LOOPS" 2>&1 | get_max)
 
 kill "$rogue" 2>/dev/null
 wait "$rogue" 2>/dev/null
@@ -36,8 +43,8 @@ if [ -z "$max" ]; then
 	exit 1
 fi
 if [ "$max" -lt "$ROGUE_MAX_FLOOR" ]; then
-	echo "RESULT rt PASS rogue-max-us "$max" <"$ROGUE_MAX_FLOOR" (baseline "$base")"
+	echo "RESULT rt PASS rogue-max-us $max <$ROGUE_MAX_FLOOR (baseline $base)"
 else
-	echo "RESULT rt FAIL rogue-max-us "$max" <"$ROGUE_MAX_FLOOR" (baseline "$base")"
+	echo "RESULT rt FAIL rogue-max-us $max <$ROGUE_MAX_FLOOR (baseline $base)"
 	exit 1
 fi

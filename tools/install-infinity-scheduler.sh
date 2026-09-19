@@ -10,6 +10,11 @@
 #   sudo bash install-infinity-scheduler.sh 7.1                     # build for kernel 7.1 (or 7.2 for the latest 7.2 RC)
 #   sudo bash install-infinity-scheduler.sh --remove                 # remove Infinity boot entries
 #   sudo bash install-infinity-scheduler.sh --status                 # show current state
+#
+# NOTE: this script always builds from a VANILLA kernel.org tree.  The
+# CachyOS kernel fork is not vanilla, so the series under
+# patches/cachyos/ cannot be installed this way — build a package with
+# CachyOS' own PKGBUILD instead (see "Building on CachyOS" in README.md).
 # ──────────────────────────────────────────────────────────────────────────────
 set -euo pipefail
 

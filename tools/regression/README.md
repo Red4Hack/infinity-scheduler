@@ -25,9 +25,36 @@ reported by users (notably the v4.6-era Alt+Tab lag, issue #16).
 | rt | cyclictest + rogue SCHED_FIFO | max latency with rogue | < 50 ms |
 | fork | stress-ng --fork | forks/s | > 2000/s |
 | ema-pelt-trace | `/proc/<pid>/infinity` + perf | divergence pp + wakeup P99 | <= 50 pp / < 500 us |
+| gpu-idle-compensation | ffmpeg VAAPI (paced) | `Idle compensation` delta | >= 10 events |
+| gpu-cpu-coupling | ffmpeg VAAPI + SCHED_IDLE control | `CPU->GPU coupling` delta | >= 10 events, control <= 25% |
 
 Missing tools produce a WARN and a skip, never a false FAIL (netperf,
 rt-app, bpftrace are not installed on the reference machine).
+
+## GPU scenarios: the DRM policy prerequisite
+
+The Infinity CPU<->GPU coupling lives entirely inside
+`drm_sched_entity_update_vruntime()` (`drivers/gpu/drm/scheduler/sched_rq.c`),
+which `drm_sched_rq_pop_entity()` only calls under
+`drm_sched_policy == DRM_SCHED_POLICY_FAIR` (2). The upstream module
+default is FIFO (1), so on a stock boot the `Idle compensation` and
+`CPU->GPU coupling` counters are structurally unreachable and stay at 0 --
+this is a configuration prerequisite, not a scheduler bug. Select the
+FAIR policy and rebuild the initramfs (the DRM driver loads early, so the
+parameter must be inside it):
+
+    # /etc/modprobe.d/infinity-gpu-sched.conf
+    options gpu-sched sched_policy=2
+
+Both GPU scenarios report `WARN policy-<n>` instead of a FAIL when the
+policy is not FAIR, and `WARN no-drm-sched` when the DRM scheduler is not
+loaded at all.
+
+Driver coverage matters just as much: only drivers that route submissions
+through `gpu-sched` participate. `amdgpu`, `xe` and `nouveau` do; **`i915`
+does not** (it keeps its own execlist scheduler), so on an i915-only
+machine every GPU counter stays 0 by design and the scenarios skip with
+`WARN no-drm-sched`.
 
 ## P0-3 audit procedure (measurement-only)
 
